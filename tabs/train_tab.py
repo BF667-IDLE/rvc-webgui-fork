@@ -1003,7 +1003,7 @@ def create_train_tab():
             with gr.Row():
                 pretrained_G14 = gr.Textbox(
                     label=i18n("Base Model G"),
-                    value="assets/pretrained_v2/f0D48k.pth",
+                    value="assets/pretrained_v2/f0G48k.pth",
                     interactive=True,
                 )
                 pretrained_D15 = gr.Textbox(
