@@ -33,3 +33,5 @@ ffprobe.*
 .gradio/flagged/dataset1.csv
 
 /.env
+
+/docker-cache
