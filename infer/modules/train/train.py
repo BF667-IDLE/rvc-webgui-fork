@@ -3,6 +3,15 @@ import os
 import sys
 import logging
 
+# ========== ADDED: tqdm for progress bars ==========
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs):
+        return iterable
+    print("tqdm not installed – progress bars disabled. Install with: pip install tqdm")
+# ===================================================
+
 logger = logging.getLogger(__name__)
 
 now_dir = os.getcwd()
@@ -332,13 +341,18 @@ def train_and_evaluate(
     net_g.train()
     net_d.train()
 
+    total_batches = len(train_loader)   # number of batches in this epoch
+
     # Prepare data iterator
     if hps.if_cache_data_in_gpu == True:
         # Use Cache
         data_iterator = cache
         if cache == []:
-            # Make new cache
-            for batch_idx, info in enumerate(train_loader):
+            # Make new cache – show progress bar on rank 0
+            cache_iter = enumerate(
+                tqdm(train_loader, desc="Caching data", unit="batch", disable=(rank != 0))
+            )
+            for batch_idx, info in cache_iter:
                 # Unpack
                 if hps.if_f0 == 1:
                     (
@@ -411,12 +425,26 @@ def train_and_evaluate(
             # Load shuffled cache
             shuffle(cache)
     else:
-        # Loader
+        # Loader – create an iterator with index
         data_iterator = enumerate(train_loader)
+
+    # ========== ADDED: wrap iterator with tqdm for rank 0 ==========
+    if rank == 0:
+        # Create a progress bar for this epoch – now includes "Train Epoch:"
+        pbar = tqdm(
+            data_iterator,
+            total=total_batches,
+            desc=f"Train Epoch: {epoch}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
+    else:
+        pbar = data_iterator
+    # ===============================================================
 
     # Run steps
     epoch_recorder = EpochRecorder()
-    for batch_idx, info in data_iterator:
+    for batch_idx, info in pbar:   # now using the progress bar
         # print(f"BATCH_IDX: {batch_idx}")
         # Data
         ## Unpack
@@ -434,7 +462,7 @@ def train_and_evaluate(
             ) = info
         else:
             phone, phone_lengths, spec, spec_lengths, wave, wave_lengths, sid = info
-        ## Load on CUDA
+        ## Load on CUDA (if not already cached)
         if (hps.if_cache_data_in_gpu == False) and torch.cuda.is_available():
             phone = phone.cuda(rank, non_blocking=True)
             phone_lengths = phone_lengths.cuda(rank, non_blocking=True)
@@ -524,14 +552,19 @@ def train_and_evaluate(
         scaler.update()
 
         if rank == 0:
+            # Update progress bar with current loss values
+            pbar.set_postfix(
+                loss_d=loss_disc.item(),
+                loss_g=loss_gen.item(),
+                loss_mel=loss_mel.item(),
+                loss_kl=loss_kl.item(),
+                lr=optim_g.param_groups[0]["lr"],
+            )
+
             if global_step % hps.train.log_interval == 0:
                 lr = optim_g.param_groups[0]["lr"]
-                logger.info(
-                    "Train Epoch: {} [{:.0f}%]".format(
-                        epoch, 100.0 * batch_idx / len(train_loader)
-                    )
-                )
-                # Amor For Tensorboard display
+                # Remove the old percentage line – now handled by tqdm
+                # Keep logging for file
                 if loss_mel > 75:
                     loss_mel = 75
                 if loss_kl > 9:
@@ -569,25 +602,13 @@ def train_and_evaluate(
                 print(
                     f"SCALAR_DICT: {json.dumps({k: v.item() if isinstance(v, torch.Tensor) else v for k, v in scalar_dict.items()})}"
                 )
-                # image_dict = {
-                #     "slice/mel_org": utils.plot_spectrogram_to_numpy(
-                #         y_mel[0].data.cpu().numpy()
-                #     ),
-                #     "slice/mel_gen": utils.plot_spectrogram_to_numpy(
-                #         y_hat_mel[0].data.cpu().numpy()
-                #     ),
-                #     "all/mel": utils.plot_spectrogram_to_numpy(
-                #         mel[0].data.cpu().numpy()
-                #     ),
-                # }
-                # utils.summarize(
-                #     writer=writer,
-                #     global_step=global_step,
-                #     images=image_dict,
-                #     scalars=scalar_dict,
-                # )
         global_step += 1
     # /Run steps
+
+    # ========== ADDED: close progress bar ==========
+    if rank == 0:
+        pbar.close()
+    # ===============================================
 
     if epoch % hps.save_every_epoch == 0 and rank == 0:
         if hps.if_latest == 0:
